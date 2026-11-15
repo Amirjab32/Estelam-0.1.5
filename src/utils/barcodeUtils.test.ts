@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyBarcodeInquiryScan,
   findBarcodeConflicts,
   findProductByBarcode,
   mapKeyEventToAsciiChar,
@@ -76,3 +77,53 @@ test('findProductByBarcode and findBarcodeConflicts work across normalized Persi
   assert.equal(conflicts[0].barcode, 'SHOP-A1');
   assert.equal(conflicts[0].ownerProduct.id, 'p1');
 });
+
+test('applyBarcodeInquiryScan collapses consecutive duplicates without multiplying quantity and preserves interleaved comparison scans', () => {
+  type Row = { entryId: string; productId: string; quantity: number };
+  let tray: Row[] = [];
+
+  // Scan A 3 times in a row -> 1 row for A with quantity 1
+  let res = applyBarcodeInquiryScan(tray, { entryId: 'e1', productId: 'A', quantity: 1 });
+  assert.equal(res.isConsecutiveDuplicate, false);
+  tray = res.nextTray;
+
+  res = applyBarcodeInquiryScan(tray, { entryId: 'e1', productId: 'A', quantity: 1 });
+  assert.equal(res.isConsecutiveDuplicate, true);
+  tray = res.nextTray;
+
+  res = applyBarcodeInquiryScan(tray, { entryId: 'e1', productId: 'A', quantity: 1 });
+  assert.equal(res.isConsecutiveDuplicate, true);
+  tray = res.nextTray;
+  assert.deepEqual(
+    tray.map((r) => ({ id: r.productId, qty: r.quantity })),
+    [{ id: 'A', qty: 1 }]
+  );
+
+  // Scan B 4 times in a row -> B above A, both quantity 1
+  for (let i = 0; i < 4; i++) {
+    res = applyBarcodeInquiryScan(tray, { entryId: 'e2', productId: 'B', quantity: 1 });
+    assert.equal(res.isConsecutiveDuplicate, i > 0);
+    tray = res.nextTray;
+  }
+  assert.deepEqual(
+    tray.map((r) => ({ id: r.productId, qty: r.quantity })),
+    [
+      { id: 'B', qty: 1 },
+      { id: 'A', qty: 1 },
+    ]
+  );
+
+  // Scan A again after B -> A appears both above B and below B, all with quantity 1
+  res = applyBarcodeInquiryScan(tray, { entryId: 'e3', productId: 'A', quantity: 1 });
+  assert.equal(res.isConsecutiveDuplicate, false);
+  tray = res.nextTray;
+  assert.deepEqual(
+    tray.map((r) => ({ id: r.productId, qty: r.quantity })),
+    [
+      { id: 'A', qty: 1 },
+      { id: 'B', qty: 1 },
+      { id: 'A', qty: 1 },
+    ]
+  );
+});
+

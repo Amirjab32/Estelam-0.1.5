@@ -262,7 +262,10 @@ function getAudioContext(): AudioContext | null {
   return sharedAudioCtx;
 }
 
-export function playScanTone(type: 'success' | 'error', muted = false): void {
+export function playScanTone(
+  type: 'success' | 'duplicate' | 'error',
+  muted = false
+): void {
   if (muted) return;
   try {
     const ctx = getAudioContext();
@@ -284,6 +287,15 @@ export function playScanTone(type: 'success' | 'error', muted = false): void {
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
       osc.start(now);
       osc.stop(now + 0.15);
+    } else if (type === 'duplicate') {
+      // Gentle muted single mid-tone for consecutive duplicate scan
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(659.25, now);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.09, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.095);
+      osc.start(now);
+      osc.stop(now + 0.1);
     } else {
       // Distinct low double-buzz for unknown barcode
       osc.type = 'triangle';
@@ -300,12 +312,47 @@ export function playScanTone(type: 'success' | 'error', muted = false): void {
   }
 }
 
-export function triggerScanHaptic(type: 'success' | 'error'): void {
+export function triggerScanHaptic(type: 'success' | 'duplicate' | 'error'): void {
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate(type === 'success' ? 45 : [75, 45, 75]);
+      if (type === 'success') {
+        navigator.vibrate(45);
+      } else if (type === 'duplicate') {
+        navigator.vibrate(20);
+      } else {
+        navigator.vibrate([75, 45, 75]);
+      }
     }
   } catch {
     // Ignore unsupported vibration API
   }
 }
+
+/**
+ * Pure inquiry-history transition:
+ * - Consecutive repeat of the current top item (A -> A -> A) never adds a row or multiplies quantity.
+ * - Scanning a different item or returning to an earlier item after another (A -> B -> A) prepends a new unit-1 row for comparison.
+ */
+export function applyBarcodeInquiryScan<
+  T extends { productId: string; quantity: number }
+>(
+  currentTray: T[],
+  incomingEntry: T
+): { nextTray: T[]; isConsecutiveDuplicate: boolean } {
+  if (currentTray.length > 0 && currentTray[0].productId === incomingEntry.productId) {
+    const updatedTop: T = {
+      ...incomingEntry,
+      quantity: currentTray[0].quantity,
+    };
+    return {
+      nextTray: [updatedTop, ...currentTray.slice(1)],
+      isConsecutiveDuplicate: true,
+    };
+  }
+
+  return {
+    nextTray: [incomingEntry, ...currentTray],
+    isConsecutiveDuplicate: false,
+  };
+}
+

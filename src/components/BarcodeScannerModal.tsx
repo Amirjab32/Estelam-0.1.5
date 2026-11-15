@@ -14,9 +14,11 @@ import {
   AlertCircle,
   ShieldAlert,
   ShoppingBag,
+  Info,
 } from 'lucide-react';
 import { ProductItem } from '../types.ts';
 import {
+  applyBarcodeInquiryScan,
   detectDefaultScannerMode,
   findProductByBarcode,
   mapKeyEventToAsciiChar,
@@ -33,6 +35,7 @@ interface BarcodeScannerModalProps {
 }
 
 interface ScannedQuoteEntry {
+  entryId: string;
   productId: string;
   name: string;
   imageUrl: string;
@@ -53,18 +56,24 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [manualInput, setManualInput] = useState('');
   const [tray, setTray] = useState<ScannedQuoteEntry[]>([]);
   const [scanFeedback, setScanFeedback] = useState<{
-    type: 'success' | 'not_found';
+    type: 'success' | 'duplicate' | 'not_found';
     code: string;
     productName?: string;
   } | null>(null);
   const [copiedTray, setCopiedTray] = useState(false);
 
   const manualInputRef = useRef<HTMLInputElement | null>(null);
+  const trayRef = useRef<ScannedQuoteEntry[]>([]);
+  const entrySeqRef = useRef<number>(0);
   const hidBufferRef = useRef<{ chars: string; lastKeyAt: number }>({
     chars: '',
     lastKeyAt: 0,
   });
   const feedbackTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    trayRef.current = tray;
+  }, [tray]);
 
   const productsRef = useRef(products);
   const isMutedRef = useRef(isMuted);
@@ -78,7 +87,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   }, [isMuted]);
 
   const showTransientFeedback = useCallback(
-    (next: { type: 'success' | 'not_found'; code: string; productName?: string }) => {
+    (next: { type: 'success' | 'duplicate' | 'not_found'; code: string; productName?: string }) => {
       setScanFeedback(next);
       if (feedbackTimerRef.current !== null) {
         window.clearTimeout(feedbackTimerRef.current);
@@ -113,46 +122,46 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
       const { product, matchedBarcode } = match;
       const sellingPrice = product.customerQuoteToman || product.currentPriceToman || 0;
+      const candidateEntry: ScannedQuoteEntry = {
+        entryId:
+          trayRef.current[0]?.productId === product.id
+            ? trayRef.current[0].entryId
+            : `scan_${Date.now()}_${++entrySeqRef.current}`,
+        productId: product.id,
+        name: product.name,
+        imageUrl: product.imageUrl,
+        stockStatus: product.stockStatus,
+        unitQuoteToman: sellingPrice,
+        matchedBarcode,
+        quantity: 1,
+        scannedAt: new Date().toISOString(),
+      };
 
-      playScanTone('success', isMutedRef.current);
-      triggerScanHaptic('success');
+      const { nextTray, isConsecutiveDuplicate } = applyBarcodeInquiryScan(
+        trayRef.current,
+        candidateEntry
+      );
 
-      setTray((prev) => {
-        const existingIdx = prev.findIndex((item) => item.productId === product.id);
-        if (existingIdx !== -1) {
-          const updated = [...prev];
-          const existing = updated[existingIdx];
-          updated[existingIdx] = {
-            ...existing,
-            quantity: existing.quantity + 1,
-            unitQuoteToman: sellingPrice,
-            stockStatus: product.stockStatus,
-            matchedBarcode,
-            scannedAt: new Date().toISOString(),
-          };
-          return updated;
-        }
+      trayRef.current = nextTray;
+      setTray(nextTray);
 
-        return [
-          {
-            productId: product.id,
-            name: product.name,
-            imageUrl: product.imageUrl,
-            stockStatus: product.stockStatus,
-            unitQuoteToman: sellingPrice,
-            matchedBarcode,
-            quantity: 1,
-            scannedAt: new Date().toISOString(),
-          },
-          ...prev,
-        ];
-      });
-
-      showTransientFeedback({
-        type: 'success',
-        code: matchedBarcode,
-        productName: product.name,
-      });
+      if (isConsecutiveDuplicate) {
+        playScanTone('duplicate', isMutedRef.current);
+        triggerScanHaptic('duplicate');
+        showTransientFeedback({
+          type: 'duplicate',
+          code: matchedBarcode,
+          productName: product.name,
+        });
+      } else {
+        playScanTone('success', isMutedRef.current);
+        triggerScanHaptic('success');
+        showTransientFeedback({
+          type: 'success',
+          code: matchedBarcode,
+          productName: product.name,
+        });
+      }
     },
     [showTransientFeedback]
   );
@@ -226,20 +235,26 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     [tray]
   );
 
-  const updateQuantity = (productId: string, delta: number) => {
-    setTray((prev) =>
-      prev
+  const updateQuantity = (entryId: string, delta: number) => {
+    setTray((prev) => {
+      const next = prev
         .map((item) =>
-          item.productId === productId
+          item.entryId === entryId
             ? { ...item, quantity: Math.max(0, item.quantity + delta) }
             : item
         )
-        .filter((item) => item.quantity > 0)
-    );
+        .filter((item) => item.quantity > 0);
+      trayRef.current = next;
+      return next;
+    });
   };
 
-  const removeEntry = (productId: string) => {
-    setTray((prev) => prev.filter((item) => item.productId !== productId));
+  const removeEntry = (entryId: string) => {
+    setTray((prev) => {
+      const next = prev.filter((item) => item.entryId !== entryId);
+      trayRef.current = next;
+      return next;
+    });
   };
 
   const handleCopyCustomerList = async () => {
@@ -413,12 +428,16 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               className={`px-3.5 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-3 ${
                 scanFeedback.type === 'not_found'
                   ? 'bg-rose-950/60 border-rose-800/70 text-rose-200'
+                  : scanFeedback.type === 'duplicate'
+                  ? 'bg-amber-950/50 border-amber-800/70 text-amber-200'
                   : 'bg-emerald-950/50 border-emerald-800/70 text-emerald-200'
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
                 {scanFeedback.type === 'not_found' ? (
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                ) : scanFeedback.type === 'duplicate' ? (
+                  <Info className="w-4 h-4 text-amber-400 shrink-0" />
                 ) : (
                   <Check className="w-4 h-4 text-emerald-400 shrink-0" />
                 )}
@@ -431,6 +450,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                       </strong>{' '}
                       ثبت نشده است.
                     </>
+                  ) : scanFeedback.type === 'duplicate' ? (
+                    <>این کالا هم‌اکنون در لیست ثبت است (تعداد تغییر نکرد): {scanFeedback.productName}</>
                   ) : (
                     <>به لیست استعلام اضافه شد: {scanFeedback.productName}</>
                   )}
@@ -462,7 +483,10 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 {tray.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => setTray([])}
+                    onClick={() => {
+                      trayRef.current = [];
+                      setTray([]);
+                    }}
                     className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-950/60 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-800/60 text-[11px] font-medium transition whitespace-nowrap"
                   >
                     <Trash2 className="w-3 h-3" />
@@ -489,7 +513,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
                   return (
                     <div
-                      key={item.productId}
+                      key={item.entryId}
                       className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-900/40 transition"
                     >
                       {/* Thumbnail + Product Info (Customer Safe Only) */}
@@ -527,7 +551,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                         <div className="inline-flex items-center gap-1 rounded-lg bg-slate-900 border border-slate-800 p-0.5">
                           <button
                             type="button"
-                            onClick={() => updateQuantity(item.productId, 1)}
+                            onClick={() => updateQuantity(item.entryId, 1)}
                             aria-label="افزایش تعداد"
                             className="w-7 h-7 rounded-md hover:bg-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition"
                           >
@@ -538,7 +562,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                           </span>
                           <button
                             type="button"
-                            onClick={() => updateQuantity(item.productId, -1)}
+                            onClick={() => updateQuantity(item.entryId, -1)}
                             aria-label="کاهش تعداد"
                             className="w-7 h-7 rounded-md hover:bg-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition"
                           >
@@ -555,7 +579,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
                         <button
                           type="button"
-                          onClick={() => removeEntry(item.productId)}
+                          onClick={() => removeEntry(item.entryId)}
                           aria-label={`حذف ${item.name} از لیست`}
                           className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 transition"
                         >
