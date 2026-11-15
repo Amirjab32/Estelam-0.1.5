@@ -54,6 +54,7 @@ import { RightDrawerMenu } from './components/RightDrawerMenu.tsx';
 import { normalizeBarcodeInput, normalizeBarcodeList } from './utils/barcodeUtils.ts';
 import { useOnlineStatus } from './hooks/useOnlineStatus.ts';
 import { usePWAInstall } from './hooks/usePWAInstall.ts';
+import { useBackNavigation } from './hooks/useBackNavigation.ts';
 import {
   fetchLiveDigikalaProductClient,
   markClient3HourSlotDone,
@@ -147,9 +148,6 @@ export default function App() {
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
 
-  const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const selectedProduct = products.find((p) => p.id === selectedProductId) || null;
-
   // View Layout mode: grid-4 | grid-3 | list | compact | large
   const [layout, setLayout] = useState<ViewLayout>(() => {
     const saved = localStorage.getItem('shop_preferred_layout');
@@ -165,15 +163,6 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [isRefreshing, setIsRefreshing] = useState(false);
-
-  // Modals & Right Hamburger Drawer
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState(false);
-  const [isSchedulerModalOpen, setIsSchedulerModalOpen] = useState(false);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-
-  // Delete confirmation
-  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -217,10 +206,52 @@ export default function App() {
     deletedIdsRef.current = deletedIds;
   }, [deletedIds]);
 
+  const toastTimerRef = useRef<number | null>(null);
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 4000);
   }, []);
+
+  const showGateServerEditorRef = useRef(showGateServerEditor);
+  useEffect(() => {
+    showGateServerEditorRef.current = showGateServerEditor;
+  }, [showGateServerEditor]);
+
+  const {
+    selectedProductId,
+    isDrawerOpen,
+    isAddModalOpen,
+    isBarcodeScannerOpen,
+    isSchedulerModalOpen,
+    deleteTarget,
+    openProductDetail,
+    closeProductDetail,
+    openDrawer,
+    closeDrawer,
+    openAddModal,
+    closeAddModal,
+    openBarcodeScanner,
+    closeBarcodeScanner,
+    openSchedulerModal,
+    closeSchedulerModal,
+    openDeleteConfirm,
+    closeDeleteConfirm,
+    closeAfterProductDelete,
+  } = useBackNavigation({
+    onShowExitConfirmToast: showToast,
+    onRootBackFallback: () => {
+      if (showGateServerEditorRef.current) {
+        setShowGateServerEditor(false);
+        return true;
+      }
+      return false;
+    },
+  });
+
+  const selectedProduct = products.find((p) => p.id === selectedProductId) || null;
 
   const recordCloudflareSuccess = useCallback((nextStatus: CloudflareStatus) => {
     cloudflareFailCountRef.current = 0;
@@ -1515,7 +1546,7 @@ export default function App() {
   const handleDeleteProduct = async () => {
     if (!deleteTarget) return;
     const target = deleteTarget;
-    setDeleteTarget(null);
+    closeAfterProductDelete(target.id);
 
     try {
       const nextDeletedIds = {
@@ -1533,9 +1564,6 @@ export default function App() {
         await commitLocalOrCloudflareBundle(nextProducts, nextHistories, nextDeletedIds);
       }
 
-      if (selectedProductId === target.id) {
-        setSelectedProductId(null);
-      }
       showToast(`کالای «${target.name}» با موفقیت حذف شد`);
     } catch (err) {
       console.error('Failed to delete product', err);
@@ -1942,10 +1970,10 @@ export default function App() {
         schedulerInfo={schedulerInfo}
         onRefreshAll={() => handleRefreshAll(false)}
         isRefreshing={isRefreshing}
-        onOpenAddModal={() => setIsAddModalOpen(true)}
-        onOpenBarcodeScanner={() => setIsBarcodeScannerOpen(true)}
-        onOpenSchedulerModal={() => setIsSchedulerModalOpen(true)}
-        onOpenDrawer={() => setIsDrawerOpen(true)}
+        onOpenAddModal={openAddModal}
+        onOpenBarcodeScanner={openBarcodeScanner}
+        onOpenSchedulerModal={openSchedulerModal}
+        onOpenDrawer={openDrawer}
         productsCount={products.length}
         storageMode={storageMode}
         connectionHealth={connectionHealth}
@@ -1975,7 +2003,7 @@ export default function App() {
             fallbackHistory={histories[selectedProduct.id] || []}
             product={selectedProduct}
             allProducts={products}
-            onBack={() => setSelectedProductId(null)}
+            onBack={closeProductDetail}
             onUpdateMargin={handleUpdateMargin}
             onUpdateBarcodes={handleUpdateBarcodes}
             onRefreshSingle={handleRefreshSingle}
@@ -2066,7 +2094,7 @@ export default function App() {
                   با استفاده از دکمه «افزودن کالا» کالای جدید ثبت کنید یا از منوی همبرگری بالا فایل بکاپ JSON را بازیابی نمایید.
                 </p>
                 <button
-                  onClick={() => setIsAddModalOpen(true)}
+                  onClick={openAddModal}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold transition"
                 >
                   <Plus className="w-4 h-4" />
@@ -2080,8 +2108,8 @@ export default function App() {
                     key={product.id}
                     product={product}
                     layout={layout}
-                    onSelect={(p) => setSelectedProductId(p.id)}
-                    onDelete={(id, name) => setDeleteTarget({ id, name })}
+                    onSelect={(p) => openProductDetail(p.id)}
+                    onDelete={(id, name) => openDeleteConfirm(id, name)}
                   />
                 ))}
               </div>
@@ -2098,7 +2126,7 @@ export default function App() {
       {/* RIGHT-SIDE HAMBURGER DRAWER MENU */}
       <RightDrawerMenu
         isOpen={isDrawerOpen}
-        onClose={() => setIsDrawerOpen(false)}
+        onClose={closeDrawer}
         storageMode={storageMode}
         storagePreference={storagePreference}
         connectionHealth={connectionHealth}
@@ -2128,7 +2156,7 @@ export default function App() {
       {/* MODALS */}
       {isAddModalOpen && (
         <AddProductModal
-          onClose={() => setIsAddModalOpen(false)}
+          onClose={closeAddModal}
           onProductAdded={handleProductAdded}
           existingProducts={products}
         />
@@ -2137,7 +2165,7 @@ export default function App() {
       {isBarcodeScannerOpen && (
         <BarcodeScannerModal
           products={products}
-          onClose={() => setIsBarcodeScannerOpen(false)}
+          onClose={closeBarcodeScanner}
         />
       )}
 
@@ -2146,7 +2174,7 @@ export default function App() {
           schedulerInfo={schedulerInfo}
           onRefreshAll={() => handleRefreshAll(false)}
           isRefreshing={isRefreshing}
-          onClose={() => setIsSchedulerModalOpen(false)}
+          onClose={closeSchedulerModal}
         />
       )}
 
@@ -2154,9 +2182,13 @@ export default function App() {
         <div
           role="dialog"
           aria-modal="true"
+          onClick={closeDeleteConfirm}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
         >
-          <div className="bg-slate-900 border border-rose-900/60 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-slate-900 border border-rose-900/60 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4"
+          >
             <div className="w-12 h-12 rounded-2xl bg-rose-950 text-rose-400 flex items-center justify-center border border-rose-800/60">
               <AlertTriangle className="w-6 h-6" />
             </div>
@@ -2174,7 +2206,7 @@ export default function App() {
             <div className="pt-2 flex items-center justify-end gap-3">
               <button
                 type="button"
-                onClick={() => setDeleteTarget(null)}
+                onClick={closeDeleteConfirm}
                 className="px-4 py-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 text-xs font-semibold transition"
               >
                 انصراف
