@@ -108,7 +108,9 @@ export default function App() {
   // Multi-backend connectivity & auth states
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [probeDone, setProbeDone] = useState(false);
+  const [cfProbeDone, setCfProbeDone] = useState(false);
+  const [fbProbeDone, setFbProbeDone] = useState(false);
+  const probeDone = cfProbeDone && fbProbeDone;
   const [firebaseReachable, setFirebaseReachable] = useState(true);
   const [firebaseDeniedEmail, setFirebaseDeniedEmail] = useState<string | null>(null);
   const [cloudflareStatus, setCloudflareStatus] = useState<CloudflareStatus>({
@@ -314,7 +316,7 @@ export default function App() {
 
   // Check whether user can view the main dashboard vs entry/PIN gate
   const hasDashboardAccess = (() => {
-    if (!probeDone && !authReady) return false;
+    if (!authReady || !cfProbeDone) return false;
     if (storagePreference === 'firebase') {
       return Boolean(firebaseReachable && user && !firebaseDeniedEmail) || offlineEntered;
     }
@@ -364,46 +366,86 @@ export default function App() {
     };
   }, []);
 
-  // 2. Parallel reachability probes for Firebase, Cloudflare/Relay & auto-verify saved Shop PIN
+  // 2. Independent reachability probes for Firebase and Cloudflare/Relay (+ instant PIN verification)
   useEffect(() => {
     let active = true;
-    async function runInitialProbes() {
-      const [fbOk, cfStatus] = await Promise.all([
-        probeFirebaseReachable(4000),
-        probeCloudflareStatus(),
-      ]);
+    let cfSettled = false;
+    let fbSettled = false;
+    let cfOkResult = false;
+    let fbOkResult = false;
+
+    const finalizeHealth = () => {
+      if (!active || !cfSettled || !fbSettled) return;
+      if (!fbOkResult && !cfOkResult) {
+        setConnectionHealth('offline');
+      } else {
+        setConnectionHealth('healthy');
+      }
+    };
+
+    async function runCloudflareProbe() {
+      let cfStatus = await probeCloudflareStatus();
       if (!active) return;
 
+      // Silent warm-up retry on cold DNS/TLS hiccup when device reports online
+      if (!cfStatus.reachable && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+        setConnectionHealth('degraded');
+        await new Promise((r) => setTimeout(r, 700));
+        if (!active) return;
+        cfStatus = await probeCloudflareStatus();
+        if (!active) return;
+      }
+
+      cfOkResult = cfStatus.reachable;
+      if (cfStatus.reachable) {
+        recordCloudflareSuccess(cfStatus);
+        const currentSavedPin = getSavedShopPin();
+        if (currentSavedPin) {
+          const pinCheck = await verifyShopPinOnEdge(currentSavedPin);
+          if (!active) return;
+          if (pinCheck.valid) {
+            setPinVerified(true);
+          } else if (pinCheck.unauthorized) {
+            clearSavedShopPin();
+            setSavedPin('');
+            setPinVerified(false);
+          }
+        }
+      } else {
+        setCloudflareStatus(cfStatus);
+      }
+
+      cfSettled = true;
+      setCfProbeDone(true);
+      finalizeHealth();
+    }
+
+    async function runFirebaseProbe() {
+      if (getStoragePreference() === 'cloudflare') {
+        fbOkResult = false;
+        setFirebaseReachable(false);
+        fbSettled = true;
+        setFbProbeDone(true);
+        finalizeHealth();
+        return;
+      }
+
+      const fbOk = await probeFirebaseReachable(2800);
+      if (!active) return;
+      fbOkResult = fbOk;
       if (fbOk) {
         recordFirebaseSuccess();
       } else {
         setFirebaseReachable(false);
       }
-
-      if (cfStatus.reachable) {
-        recordCloudflareSuccess(cfStatus);
-      } else {
-        setCloudflareStatus(cfStatus);
-        if (!fbOk) {
-          setConnectionHealth('offline');
-        }
-      }
-
-      const currentSavedPin = getSavedShopPin();
-      if (cfStatus.reachable && currentSavedPin) {
-        const pinCheck = await verifyShopPinOnEdge(currentSavedPin);
-        if (!active) return;
-        if (pinCheck.valid) {
-          setPinVerified(true);
-        } else if (pinCheck.unauthorized) {
-          clearSavedShopPin();
-          setSavedPin('');
-          setPinVerified(false);
-        }
-      }
-      setProbeDone(true);
+      fbSettled = true;
+      setFbProbeDone(true);
+      finalizeHealth();
     }
-    runInitialProbes();
+
+    runCloudflareProbe();
+    runFirebaseProbe();
+
     return () => {
       active = false;
     };
@@ -525,10 +567,21 @@ export default function App() {
 
   // 4. Primary Data Loader Effect based on active storageMode
   useEffect(() => {
-    if (!probeDone) return;
+    if (!cfProbeDone) return;
 
     // Mode A: Firebase Primary
     if (storageMode === 'firebase' && user) {
+      if (!fbProbeDone) {
+        if (productsRef.current.length === 0) {
+          const cached = loadOfflineBundle();
+          if (cached && cached.products.length > 0) {
+            setProducts(cached.products);
+            setHistories(cached.histories || {});
+            setDeletedIds(cached.deletedIds || {});
+          }
+        }
+        return;
+      }
       let isActive = true;
       let unsubscribeProducts: (() => void) | undefined;
 
@@ -689,7 +742,7 @@ export default function App() {
     }
 
     // Mode C: Offline Local Cache (Non-destructive: never clobber already loaded in-memory products)
-    if (hasDashboardAccess && storageMode === 'offline') {
+    if (hasDashboardAccess && storageMode === 'offline' && (probeDone || offlineEntered)) {
       if (productsRef.current.length === 0) {
         const cached = loadOfflineBundle() || createSeedOfflineBundle();
         setProducts(cached.products);
@@ -703,6 +756,9 @@ export default function App() {
     }
   }, [
     probeDone,
+    cfProbeDone,
+    fbProbeDone,
+    offlineEntered,
     storageMode,
     user,
     savedPin,
@@ -1143,9 +1199,12 @@ export default function App() {
       if (cfStatus.reachable || fbOk) {
         showToast('ارتباط با سرور برقرار شد');
       } else {
+        setConnectionHealth('offline');
         showToast('هنوز پاسخی از سرور دریافت نشد؛ اینترنت یا آدرس سرور را بررسی کنید');
       }
     } finally {
+      setCfProbeDone(true);
+      setFbProbeDone(true);
       setIsRetryingConnection(false);
     }
   };
@@ -1154,7 +1213,7 @@ export default function App() {
     persistStoragePreference(pref);
     setStoragePreference(pref);
     if (pref === 'firebase') {
-      const fbOk = await probeFirebaseReachable(3500);
+      const fbOk = await probeFirebaseReachable(3200);
       setFirebaseReachable(fbOk);
       if (!fbOk) {
         showToast('فایربیس در حال حاضر در دسترس نیست (نیاز به فیلترشکن)');
@@ -1164,6 +1223,11 @@ export default function App() {
     } else if (pref === 'cloudflare') {
       showToast('حالت ذخیره‌سازی روی کلادفلر (بدون فیلترشکن) قرار گرفت');
     } else {
+      if (!firebaseReachable) {
+        probeFirebaseReachable(2800).then((ok) => {
+          if (ok) recordFirebaseSuccess();
+        });
+      }
       showToast('حالت خودکار فعال شد (پیش‌فرض فایربیس با سوئیچ خودکار به کلادفلر)');
     }
   };
@@ -1727,14 +1791,14 @@ export default function App() {
     }
   };
 
-  // Wait briefly for initial connectivity probes
-  if (!probeDone && !authReady) {
+  // Wait briefly for auth + fast Cloudflare/Relay connectivity probe
+  if (!authReady || !cfProbeDone) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-300 flex flex-col items-center justify-center gap-3 font-sans">
         <div className="w-12 h-12 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center">
-          <Cloud className="w-6 h-6 text-indigo-400" />
+          <Cloud className="w-6 h-6 text-indigo-400 animate-pulse" />
         </div>
-        <span className="text-sm font-medium">در حال بررسی اتصال فایربیس و کلادفلر...</span>
+        <span className="text-sm font-medium">در حال بررسی و برقراری اتصال با سرور...</span>
       </div>
     );
   }
@@ -1742,7 +1806,7 @@ export default function App() {
   // Dual Access Gate (Google Firebase OR Cloudflare Shop PIN OR Offline JSON mode)
   if (!hasDashboardAccess) {
     const isFailoverToCloudflare = !firebaseReachable && cloudflareStatus.reachable;
-    const isBothUnreachable = !firebaseReachable && !cloudflareStatus.reachable;
+    const isBothUnreachable = probeDone && !firebaseReachable && !cloudflareStatus.reachable;
 
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
@@ -1981,11 +2045,12 @@ export default function App() {
         isSyncingCloud={isSyncingCloud}
       />
 
-      {/* Net-Melli / Offline Status Banner (hidden during healthy & transient degraded retries) */}
+      {/* Net-Melli / Offline Status Banner (hidden during startup probes, healthy state & transient degraded retries) */}
       <OfflineIndicator
         isBrowserOnline={isBrowserOnline}
         storageMode={storageMode}
         connectionHealth={connectionHealth}
+        isInitialChecking={!cfProbeDone || (!fbProbeDone && storageMode === 'offline')}
         isNativeAndroid={isNativeAndroid}
         isElectronDesktop={isElectronDesktop}
         cloudflareKvMissing={cloudflareStatus.reachable && !cloudflareStatus.kvConfigured}

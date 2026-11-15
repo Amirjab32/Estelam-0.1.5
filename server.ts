@@ -606,18 +606,59 @@ function mergeServerBundles(base: ServerBundle, incoming: ServerBundle): ServerB
   };
 }
 
+let cachedUpstreamKvStatus: {
+  origin: string;
+  checkedAt: number;
+  reachable: boolean;
+  kvConfigured: boolean;
+  kvBindingName?: string | null;
+} | null = null;
+let upstreamKvProbeInFlight: Promise<void> | null = null;
+
+async function refreshUpstreamKvStatus(origin: string, waitMs: number): Promise<void> {
+  if (!upstreamKvProbeInFlight) {
+    upstreamKvProbeInFlight = (async () => {
+      try {
+        const upstreamRes = await relayToCloudflareUpstream(origin, '/api/kv/status', {
+          method: 'GET',
+          timeoutMs: 2200,
+        });
+        cachedUpstreamKvStatus = {
+          origin,
+          checkedAt: Date.now(),
+          reachable: Boolean(upstreamRes?.ok && upstreamRes?.data?.available),
+          kvConfigured: Boolean(upstreamRes?.data?.kvConfigured),
+          kvBindingName: upstreamRes?.data?.kvBindingName ?? null,
+        };
+      } finally {
+        upstreamKvProbeInFlight = null;
+      }
+    })();
+  }
+  await Promise.race([
+    upstreamKvProbeInFlight,
+    new Promise<void>((resolve) => setTimeout(resolve, waitMs)),
+  ]);
+}
+
 app.get('/api/kv/status', async (req, res) => {
   const upstream = resolveUpstreamCloudflareOrigin(req);
-  let upstreamRes: { ok: boolean; status: number; data: any } | null = null;
   if (upstream) {
-    upstreamRes = await relayToCloudflareUpstream(upstream, '/api/kv/status', {
-      method: 'GET',
-      timeoutMs: 3800,
-    });
+    const isFresh =
+      cachedUpstreamKvStatus &&
+      cachedUpstreamKvStatus.origin === upstream &&
+      Date.now() - cachedUpstreamKvStatus.checkedAt < 25000;
+    if (!isFresh) {
+      await refreshUpstreamKvStatus(upstream, cachedUpstreamKvStatus ? 200 : 1200);
+    }
   }
 
-  const upstreamReachable = Boolean(upstreamRes?.ok && upstreamRes?.data?.available);
-  const upstreamKvConfigured = Boolean(upstreamRes?.data?.kvConfigured);
+  const upstreamState =
+    upstream && cachedUpstreamKvStatus && cachedUpstreamKvStatus.origin === upstream
+      ? cachedUpstreamKvStatus
+      : null;
+  const upstreamReachable = Boolean(upstreamState?.reachable);
+  const upstreamKvConfigured = Boolean(upstreamState?.kvConfigured);
 
   res.json({
     success: true,
@@ -627,7 +668,7 @@ app.get('/api/kv/status', async (req, res) => {
     relayed: upstreamReachable && upstreamKvConfigured,
     upstreamReachable,
     upstreamKvConfigured,
-    kvBindingName: upstreamRes?.data?.kvBindingName || (upstreamReachable ? 'RELAY_KV' : 'LOCAL_STORE'),
+    kvBindingName: upstreamState?.kvBindingName || (upstreamReachable ? 'RELAY_KV' : 'LOCAL_STORE'),
     environment:
       upstreamReachable && upstreamKvConfigured
         ? 'Cloudflare Relay + Local Express Store'
@@ -744,7 +785,7 @@ app.get('/api/kv/bundle', async (req, res) => {
     const upstreamRes = await relayToCloudflareUpstream(upstream, '/api/kv/bundle', {
       method: 'GET',
       pin,
-      timeoutMs: 6000,
+      timeoutMs: 4500,
     });
 
     if (upstreamRes) {
@@ -766,7 +807,7 @@ app.get('/api/kv/bundle', async (req, res) => {
             method: 'PUT',
             pin,
             body: merged,
-            timeoutMs: 6000,
+            timeoutMs: 4500,
           });
           return res.json({
             success: true,
@@ -844,7 +885,7 @@ app.put('/api/kv/bundle', async (req, res) => {
       method: 'PUT',
       pin,
       body: incomingBundle,
-      timeoutMs: 6500,
+      timeoutMs: 4500,
     });
 
     if (upstreamRes) {

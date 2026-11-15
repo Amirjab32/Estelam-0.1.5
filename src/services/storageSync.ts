@@ -622,7 +622,7 @@ export async function probeCloudflareStatus(): Promise<CloudflareStatus> {
       try {
         const res = await edgeHttpRequest(`${base}/api/kv/status`, {
           method: 'GET',
-          timeoutMs: Capacitor.isNativePlatform() ? 7500 : 4800,
+          timeoutMs: Capacitor.isNativePlatform() ? 7500 : 5000,
           isSameOriginRelay: base === '',
         });
         const json = res.data;
@@ -754,7 +754,7 @@ export async function fetchCloudflareBundle(pin: string): Promise<{
       const res = await edgeHttpRequest(`${base}/api/kv/bundle`, {
         method: 'GET',
         headers: { 'X-Shop-Pin': pin.trim() },
-        timeoutMs: Capacitor.isNativePlatform() ? 9500 : 6500,
+        timeoutMs: Capacitor.isNativePlatform() ? 10500 : 8500,
         isSameOriginRelay: base === '',
       });
       if (res.status === 401) {
@@ -823,7 +823,7 @@ export async function pushCloudflareBundle(
           'X-Shop-Pin': pin.trim(),
         },
         body: bundle,
-        timeoutMs: Capacitor.isNativePlatform() ? 10000 : 7000,
+        timeoutMs: Capacitor.isNativePlatform() ? 11000 : 9000,
         isSameOriginRelay: base === '',
       });
       if (res.status === 401) {
@@ -901,9 +901,12 @@ async function probeFirebaseOnce(timeoutMs: number): Promise<boolean> {
   }
 }
 
-export async function probeFirebaseReachable(timeoutMs = 4000): Promise<boolean> {
+export async function probeFirebaseReachable(timeoutMs = 2800): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
   const first = await probeFirebaseOnce(timeoutMs);
   if (first) return true;
-  await new Promise((r) => setTimeout(r, 300));
-  return probeFirebaseOnce(timeoutMs);
+  await new Promise((r) => setTimeout(r, 250));
+  return probeFirebaseOnce(Math.min(timeoutMs, 2200));
 }

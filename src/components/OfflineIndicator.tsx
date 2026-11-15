@@ -6,6 +6,7 @@ interface OfflineIndicatorProps {
   isBrowserOnline: boolean;
   storageMode: StorageMode;
   connectionHealth?: ConnectionHealthState;
+  isInitialChecking?: boolean;
   isNativeAndroid: boolean;
   isElectronDesktop: boolean;
   cloudflareKvMissing?: boolean;
@@ -17,13 +18,15 @@ export const OfflineIndicator: React.FC<OfflineIndicatorProps> = ({
   isBrowserOnline,
   storageMode,
   connectionHealth = 'healthy',
+  isInitialChecking = false,
   isNativeAndroid,
   isElectronDesktop,
   cloudflareKvMissing = false,
   onRetryConnection,
   isRetrying = false,
 }) => {
-  // Never flash the Net-Melli banner during transient 'degraded' background retries
+  // Never flash the Net-Melli banner during initial startup checks or transient 'degraded' retries
+  if (isInitialChecking) return null;
   if (isBrowserOnline && storageMode !== 'offline') return null;
   if (isBrowserOnline && connectionHealth === 'degraded') return null;
 
